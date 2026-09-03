@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import yaml
 
 REQUIRED_COLUMNS = [
     "Physical Table Name",
@@ -78,78 +79,85 @@ def build_mapping_document(table_mapping, column_mapping):
     }
 
 
-def render_markdown(dataframe, table_mapping, column_mapping):
-    lines = [
-        "# Masked Data Dictionary",
-        "",
-        "This file contains masked names only. Use masking_mapping.json to restore original names.",
-        "",
-    ]
-
+def build_metadata_document(dataframe, table_mapping, column_mapping):
+    tables = []
     for table_name, masked_table in table_mapping.items():
-        lines.extend([f"## {masked_table}", ""])
         table_rows = dataframe[dataframe["Physical Table Name"] == table_name]
-        rendered_columns = set()
+        columns = []
         for _, row in table_rows.iterrows():
             column_name = row["Physical Column Name"]
-            if not column_name or column_name in rendered_columns:
+            if not column_name or any(
+                column["name"] == column_mapping[column_name] for column in columns
+            ):
                 continue
-            rendered_columns.add(column_name)
-            masked_column = column_mapping[column_name]
-            lines.extend(
-                [
-                    f"### {masked_column}",
-                    f"data_type: {row['data type']}",
-                    f"length: {row['length']}",
-                    f"precision: {row['precision']}",
-                    f"nullable: {row['Null?']}",
-                    f"key: {row['Key']}",
-                    "",
-                ]
+            columns.append(
+                {
+                    "name": column_mapping[column_name],
+                    "data_type": row["data type"] or None,
+                    "length": row["length"] or None,
+                    "precision": row["precision"] or None,
+                    "nullable": row["Null?"] != "NOT NULL",
+                    "key_type": {
+                        "PK": "primary_key",
+                        "FK": "foreign_key",
+                    }.get(row["Key"].upper()) or None,
+                }
             )
+        tables.append({"name": masked_table, "columns": columns})
 
-    lines.append("## Relationships")
-    lines.append("")
-    rendered_relationships = set()
+    relationships = []
     for table_name in table_mapping:
         table_rows = dataframe[dataframe["Physical Table Name"] == table_name]
         for _, row in table_rows.iterrows():
             column_name = row["Physical Column Name"]
-            if not column_name:
+            if not column_name or "FK" not in row["Key"].upper():
                 continue
-            masked_column = column_mapping[column_name]
-            relationship = (table_name, column_name)
-            if "FK" not in row["Key"].upper() or relationship in rendered_relationships:
-                continue
-            rendered_relationships.add(relationship)
-            lines.append(f"- table: {table_mapping[table_name]}")
-            lines.append(f"  column: {masked_column}")
-            lines.append("  type: foreign_key")
-            lines.append("")
-    return "\n".join(lines).rstrip() + "\n"
+            relationships.append(
+                {
+                    "child_table": table_mapping[table_name],
+                    "child_column": column_mapping[column_name],
+                    "parent_table": None,
+                    "parent_column": None,
+                }
+            )
+    return {
+        "format_version": 1,
+        "tables": tables,
+        "relationships": relationships,
+    }
 
 
-def write_outputs(markdown, mapping_document, output_md, output_json):
-    Path(output_md).write_text(markdown, encoding="utf-8")
+def write_outputs(metadata_document, mapping_document, output_yaml, output_json):
+    Path(output_yaml).write_text(
+        yaml.safe_dump(metadata_document, sort_keys=False, allow_unicode=False),
+        encoding="utf-8",
+    )
     Path(output_json).write_text(
         json.dumps(mapping_document, indent=2, ensure_ascii=True) + "\n",
         encoding="utf-8",
     )
 
 
-def main(input_file, sheet_name, output_md, output_json):
+def main(input_file, sheet_name, output_yaml, output_json):
     dataframe = load_metadata(input_file, sheet_name)
     table_mapping, column_mapping = create_mappings(dataframe)
-    markdown = render_markdown(dataframe, table_mapping, column_mapping)
+    metadata_document = build_metadata_document(
+        dataframe, table_mapping, column_mapping
+    )
     mapping_document = build_mapping_document(table_mapping, column_mapping)
-    write_outputs(markdown, mapping_document, output_md, output_json)
-    print(f"Generated: {output_md}")
+    write_outputs(metadata_document, mapping_document, output_yaml, output_json)
+    print(f"Generated: {output_yaml}")
     print(f"Generated: {output_json}")
 
 
 if __name__ == "__main__":
     input_file = "data/Test.xlsx"
     sheet_name = "Mapping Columns"
-    output_md = "data/masked_data_dictionary.md"
+    output_yaml = "data/masked_data_dictionary.yaml"
     output_json = "data/masking_mapping.json"
-    main(input_file=input_file, sheet_name=sheet_name, output_md=output_md, output_json=output_json)
+    main(
+        input_file=input_file,
+        sheet_name=sheet_name,
+        output_yaml=output_yaml,
+        output_json=output_json,
+    )
